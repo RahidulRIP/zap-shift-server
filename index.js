@@ -5,6 +5,12 @@ require("dotenv").config();
 const port = process.env.PORT || 9000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(`${process.env.STRIPE_SECRET_KEY}`);
+const admin = require("firebase-admin");
+const serviceAccount = require(`./zap-shift-client-service.json`);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 // this function create trackingId start
 const crypto = require("crypto");
@@ -41,6 +47,25 @@ app.get("/", (req, res) => {
   res.send(`zap shift server is running`);
 });
 
+const verifyFirebaseToken = async (req, res, next) => {
+  const token = req?.headers?.authorization;
+
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+
+  try {
+    const accessToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(accessToken);
+    req.Token_email = decoded?.email;
+    next();
+  } catch (err) {
+    res.status(401).send({ message: "unauthorized access" });
+  }
+
+  // console.log(accessToken);
+};
+
 async function run() {
   try {
     await client.connect();
@@ -48,6 +73,39 @@ async function run() {
     const db = client.db("zap_shift_db");
     const parcelsCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
+    const userCollection = db.collection("users");
+
+    // users related api's start
+
+    // [register.jsx ]
+    app.post("/users", async (req, res) => {
+      const userData = req.body;
+      userData.role = "user";
+      userData.createdAt = new Date();
+
+      const email = userData?.email;
+      const userExits = await userCollection.findOne({ email });
+      if (userExits) {
+        return res.send({
+          message: "user exists",
+        });
+      }
+
+      const result = await userCollection.insertOne(userData);
+      res.send(result);
+    });
+
+    app.get("/users", async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+      if (email) {
+        query.email = email;
+      }
+      const result = await userCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    // users related api's end
 
     // [MyParcels.jsx]
     app.get("/parcels", async (req, res) => {
@@ -177,13 +235,20 @@ async function run() {
       res.send({ success: false });
     });
 
-    app.get("/payments", async (req, res) => {
+    app.get("/payments", verifyFirebaseToken, async (req, res) => {
       const query = {};
       const email = req.query.email;
       if (email) {
+        const token_email = req.Token_email;
+        if (email !== token_email) {
+          return res.status(403).send({ message: "forbidden access" });
+        }
         query.customerEmail = email;
       }
-      const result = await paymentCollection.find(query).toArray();
+      const result = await paymentCollection
+        .find(query)
+        .sort({ paidAt: -1 })
+        .toArray();
       res.send(result);
     });
 
